@@ -1,2 +1,2 @@
 all:
-	nvcc Main.cu -o erosion -Iexternal
+	nvcc Main.cu -o erosion -O3 -Iexternal
