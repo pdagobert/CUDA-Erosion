@@ -2,6 +2,7 @@
 #include <string>
 #include <fstream>
 #include <iostream>
+#include <chrono>
 
 #include <glm/glm.hpp>
 #include <Simplex.h>
@@ -120,13 +121,24 @@ void save( const std::string& fileName, int width, int height, const std::vector
     file.write( reinterpret_cast< const char* >( &heightmap[ 0 ] ), heightmap.size() * sizeof( float ) );
 }
 
+void cpuErosion( int size )
+{
+    auto heightmap = generateNoiseTexture( size );
+
+    auto start = std::chrono::high_resolution_clock::now();
+    erode( heightmap, size );
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast< std::chrono::milliseconds >( end - start ).count();
+
+    std::cout << "cpu erosion took " << duration << "ms" << std::endl;
+
+    save( "noiseCPU.raw", size, size, heightmap );
+}
+
 int main()
 {
     const int HeightmapSize = 1024;
-
-    auto heightmap = generateNoiseTexture( HeightmapSize );
-    erode( heightmap, HeightmapSize );
-
-    save( "noise.raw", HeightmapSize, HeightmapSize, heightmap );
+    cpuErosion( 1024 );
     return 0;
 }
