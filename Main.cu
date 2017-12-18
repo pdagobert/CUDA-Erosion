@@ -153,9 +153,9 @@ void erodeKernel( float* heightmap, int size, int iterations, float* water, floa
 
     for( int i = 0; i < iterations; i++ )
     {
-        for( int y = 1 + starty; y < size - 2; y += stridey )
+        for( int y = 1 + starty; y < size - 1; y += stridey )
         {
-            for( int x = 1 + startx; x < size - 2; x += stridex )
+            for( int x = 1 + startx; x < size - 1; x += stridex )
             {
                 int index = x + y * size;
 
@@ -206,9 +206,9 @@ void erodeKernel( float* heightmap, int size, int iterations, float* water, floa
 
         __syncthreads();
 
-        for( int y = 1 + starty; y < size - 2; y += stridey )
+        for( int y = 1 + starty; y < size - 1; y += stridey )
         {
-            for( int x = 1 + startx; x < size - 2; x += stridex )
+            for( int x = 1 + startx; x < size - 1; x += stridex )
             {
                 int index = x + y * size;
 
@@ -227,7 +227,180 @@ void erodeKernel( float* heightmap, int size, int iterations, float* water, floa
     }
 }
 
-void gpuErosion( int size, int iterations )
+__global__
+void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __restrict__ water, float* __restrict__ tmpWater, float* __restrict__ dheightV )
+{
+    __shared__ float heightmapCache[ 34 * 34 ];
+
+    const float Scale = 1.0f;
+    const float Evaporation = 0.9f;
+
+    /*int startx = threadIdx.x + blockIdx.x * blockDim.x;
+    int starty = threadIdx.y + blockIdx.y * blockDim.y;
+    int stridex = blockDim.x * gridDim.x;
+    int stridey = blockDim.y * gridDim.y;
+
+    for( int y = 1 + starty; y < size - 2; y += stridey )
+    {
+        for( int x = 1 + startx; x < size - 2; x += stridex )
+        {*/
+            int x2 = threadIdx.x + blockIdx.x * blockDim.x;
+            int y2 = threadIdx.y + blockIdx.y * blockDim.y;
+            int indexGlobal = x2 + y2 * size;
+
+            int tileSize = 34;
+
+            int x = threadIdx.x + 1;
+            int y = threadIdx.y + 1;
+            int indexLocal = x + y * tileSize;
+
+            heightmapCache[ indexLocal ] = heightmap[ indexGlobal ];
+
+            if( x2 == 0 || y2 == 0 || x2 == size - 1 || y2 == size - 1 )
+                return;
+
+            int offset = 0;
+
+            if( threadIdx.x == 0 )
+                offset = -1;
+
+            if( threadIdx.x == 31 )
+                offset = 1;
+
+            if( offset != 0 )
+            {
+                int borderGlobal = x2 + offset + y2 * size;
+                int borderLocal = x + offset + y * tileSize;
+                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+            }
+
+            offset = 0;
+
+            if( threadIdx.y == 0 )
+                offset = -1;
+
+            if( threadIdx.y == 31 )
+                offset = 1;
+
+            if( offset != 0 )
+            {
+                int borderGlobal = x2 + ( y2 + offset ) * size;
+                int borderLocal = x + ( y + offset ) * tileSize;
+                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+            }
+
+            int xoffset = 0;
+            int yoffset = 0;
+
+            if( threadIdx.x == 0 && threadIdx.y == 0 )
+            {
+                xoffset = -1;
+                yoffset = -1;
+            }
+
+            if( threadIdx.x == 31 && threadIdx.y == 0 )
+            {
+                xoffset = 1;
+                yoffset = -1;
+            }
+
+            if( threadIdx.x == 0 && threadIdx.y == 31 )
+            {
+                xoffset = -1;
+                yoffset = 1;
+            }
+
+            if( threadIdx.x == 31 && threadIdx.y == 31 )
+            {
+                xoffset = 1;
+                yoffset = 1;
+            }
+
+            if( xoffset != 0 )
+            {
+                int borderGlobal = x2 + xoffset + ( y2 + yoffset ) * size;
+                int borderLocal = x + xoffset + ( y + yoffset ) * tileSize;
+                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+            }
+
+            __syncthreads();
+
+            float m = heightmapCache[ x + y * tileSize ];
+            float dtl = heightmapCache[ x - 1 + ( y + 1 ) * tileSize ];
+            dtl = max( m - dtl, 0.0f );
+            float dt = heightmapCache[ x + ( y + 1 ) * tileSize ];
+            dt = max( m - dt, 0.0f );
+            float dtr = heightmapCache[ x + 1 + ( y + 1 ) * tileSize ];
+            dtr = max( m - dtr, 0.0f );
+            float dml = heightmapCache[ x - 1 + y * tileSize ];
+            dml = max( m - dml, 0.0f );
+            float dmr = heightmapCache[ x + 1 + y * tileSize ];
+            dmr = max( m - dmr, 0.0f );
+            float dbl = heightmapCache[ x - 1 + ( y - 1 ) * tileSize ];
+            dbl = max( m - dbl, 0.0f );
+            float db = heightmapCache[ x + ( y - 1 ) * tileSize ];
+            db = max( m - db, 0.0f );
+            float dbr = heightmapCache[ x + 1 + ( y - 1 ) * tileSize ];
+            dbr = max( m - dbr, 0.0f );
+
+            float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
+
+            if( dheight != 0.0f )
+            {
+                float w = water[ indexGlobal ] * Evaporation;
+                float remainingWater = w * 0.0002 / ( dheight * Scale + 1.0f );
+                w -= remainingWater;
+
+                // the only place where race condition can occur
+
+                atomicAdd( &tmpWater[ x2 - 1 + ( y2 + 1 ) * size ], dtl / dheight * w );
+                atomicAdd( &tmpWater[ x2 + ( y2 + 1 ) * size ], dt / dheight * w );
+                atomicAdd( &tmpWater[ x2 + 1 + ( y2 + 1 ) * size ], dtr / dheight * w );
+                atomicAdd( &tmpWater[ x2 - 1 + y2 * size ], dml / dheight * w );
+                atomicAdd( &tmpWater[ x2 + 1 + y2 * size ], dmr / dheight * w );
+                atomicAdd( &tmpWater[ x2 - 1 + ( y2 - 1 ) * size ], dbl / dheight * w );
+                atomicAdd( &tmpWater[ x2 + ( y2 - 1 ) * size ], db / dheight * w );
+                atomicAdd( &tmpWater[ x2 + 1 + ( y2 - 1 ) * size ], dbr / dheight * w );
+
+                water[ indexGlobal ] = 1.0f + remainingWater;
+            }
+
+            dheightV[ indexGlobal ] = dheight;
+    //    }
+    //}
+}
+
+__global__
+void erodeSecondPassKernel( float* __restrict__ heightmap, int size, float* __restrict__ water, float* __restrict__ tmpWater, float* __restrict__ dheightV )
+{
+    const float Scale = 1.0f;
+    const float Erosion = 0.0005 * Scale;
+    const float Deposition = 0.0000002 * Scale;
+
+    int startx = threadIdx.x + blockIdx.x * blockDim.x;
+    int starty = threadIdx.y + blockIdx.y * blockDim.y;
+    int stridex = blockDim.x * gridDim.x;
+    int stridey = blockDim.y * gridDim.y;
+
+    for( int y = 1 + starty; y < size - 1; y += stridey )
+    {
+        for( int x = 1 + startx; x < size - 1; x += stridex )
+        {
+            int index = x + y * size;
+
+            water[ index ] += tmpWater[ index ];
+            tmpWater[ index ] = 0;
+
+            float oldHeight = heightmap[ index ];
+            heightmap[ index ] += ( -( dheightV[ index ] - 0.005f / Scale ) * water[ index ] ) * Erosion + water[ index ] * Deposition;
+
+            if( oldHeight < heightmap[ index ] )
+                water[ index ] = max( water[ index ] - ( heightmap[ index ] - oldHeight ) * 1000.0f, 0.0f );
+        }
+    }
+}
+
+void gpuErosion( int size, int iterations, bool multiPass )
 {
     int bufferSize = sizeof( float ) * size * size;
 
@@ -250,7 +423,19 @@ void gpuErosion( int size, int iterations )
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    erodeKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, iterations, water, tmpWater, dheightV );
+    if( multiPass )
+    {
+        for( int i = 0; i < iterations; i++ )
+        {
+            erodeFirstPassKernel<<< dim3( 64, 64 ), dim3( 32, 32 ) >>>( heightmap, size, water, tmpWater, dheightV );
+            erodeSecondPassKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, water, tmpWater, dheightV );
+        }
+    }
+    else
+    {
+        erodeKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, iterations, water, tmpWater, dheightV );
+    }
+
     cudaDeviceSynchronize();
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -269,7 +454,7 @@ int main()
 {
     const int HeightmapSize = 2048;
     const int Iterations = 300;
-    cpuErosion( HeightmapSize, Iterations );
-    gpuErosion( HeightmapSize, Iterations );
+    //cpuErosion( HeightmapSize, Iterations );
+    gpuErosion( HeightmapSize, Iterations, true );
     return 0;
 }
