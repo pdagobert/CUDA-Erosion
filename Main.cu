@@ -256,15 +256,12 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
 
             heightmapCache[ indexLocal ] = heightmap[ indexGlobal ];
 
-            if( x2 == 0 || y2 == 0 || x2 == size - 1 || y2 == size - 1 )
-                return;
-
             int offset = 0;
 
-            if( threadIdx.x == 0 )
+            if( threadIdx.x == 0 && x2 != 0 )
                 offset = -1;
 
-            if( threadIdx.x == 31 )
+            if( threadIdx.x == 31 && x2 != size - 1 )
                 offset = 1;
 
             if( offset != 0 )
@@ -276,10 +273,10 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
 
             offset = 0;
 
-            if( threadIdx.y == 0 )
+            if( threadIdx.y == 0 && y2 != 0 )
                 offset = -1;
 
-            if( threadIdx.y == 31 )
+            if( threadIdx.y == 31 && y2 != size - 1 )
                 offset = 1;
 
             if( offset != 0 )
@@ -292,25 +289,25 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
             int xoffset = 0;
             int yoffset = 0;
 
-            if( threadIdx.x == 0 && threadIdx.y == 0 )
+            if( threadIdx.x == 0 && threadIdx.y == 0 && ( x2 != 0 && y2 != 0 ) )
             {
                 xoffset = -1;
                 yoffset = -1;
             }
 
-            if( threadIdx.x == 31 && threadIdx.y == 0 )
+            if( threadIdx.x == 31 && threadIdx.y == 0 && ( x2 != size - 1 && y2 != 0 ) )
             {
                 xoffset = 1;
                 yoffset = -1;
             }
 
-            if( threadIdx.x == 0 && threadIdx.y == 31 )
+            if( threadIdx.x == 0 && threadIdx.y == 31 && ( x2 != 0 && y2 != size - 1 ) )
             {
                 xoffset = -1;
                 yoffset = 1;
             }
 
-            if( threadIdx.x == 31 && threadIdx.y == 31 )
+            if( threadIdx.x == 31 && threadIdx.y == 31 && ( x2 != size - 1 && y2 != size - 1 ) )
             {
                 xoffset = 1;
                 yoffset = 1;
@@ -325,22 +322,26 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
 
             __syncthreads();
 
-            float m = heightmapCache[ x + y * tileSize ];
+            if( x2 == 0 || y2 == 0 || x2 == size - 1 || y2 == size - 1 )
+                return;
+
             float dtl = heightmapCache[ x - 1 + ( y + 1 ) * tileSize ];
-            dtl = max( m - dtl, 0.0f );
             float dt = heightmapCache[ x + ( y + 1 ) * tileSize ];
-            dt = max( m - dt, 0.0f );
             float dtr = heightmapCache[ x + 1 + ( y + 1 ) * tileSize ];
-            dtr = max( m - dtr, 0.0f );
             float dml = heightmapCache[ x - 1 + y * tileSize ];
-            dml = max( m - dml, 0.0f );
+            float m = heightmapCache[ indexLocal ];
             float dmr = heightmapCache[ x + 1 + y * tileSize ];
-            dmr = max( m - dmr, 0.0f );
             float dbl = heightmapCache[ x - 1 + ( y - 1 ) * tileSize ];
-            dbl = max( m - dbl, 0.0f );
             float db = heightmapCache[ x + ( y - 1 ) * tileSize ];
-            db = max( m - db, 0.0f );
             float dbr = heightmapCache[ x + 1 + ( y - 1 ) * tileSize ];
+
+            dtl = max( m - dtl, 0.0f );
+            dt = max( m - dt, 0.0f );
+            dtr = max( m - dtr, 0.0f );
+            dml = max( m - dml, 0.0f );
+            dmr = max( m - dmr, 0.0f );
+            dbl = max( m - dbl, 0.0f );
+            db = max( m - db, 0.0f );
             dbr = max( m - dbr, 0.0f );
 
             float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
@@ -352,7 +353,6 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
                 w -= remainingWater;
 
                 // the only place where race condition can occur
-
                 atomicAdd( &tmpWater[ x2 - 1 + ( y2 + 1 ) * size ], dtl / dheight * w );
                 atomicAdd( &tmpWater[ x2 + ( y2 + 1 ) * size ], dt / dheight * w );
                 atomicAdd( &tmpWater[ x2 + 1 + ( y2 + 1 ) * size ], dtr / dheight * w );
@@ -425,10 +425,14 @@ void gpuErosion( int size, int iterations, bool multiPass )
 
     if( multiPass )
     {
+        const int TileSize = 32;
+        dim3 numThreads( TileSize, TileSize );
+        dim3 numBlocks( size / TileSize, size / TileSize );
+
         for( int i = 0; i < iterations; i++ )
         {
-            erodeFirstPassKernel<<< dim3( 64, 64 ), dim3( 32, 32 ) >>>( heightmap, size, water, tmpWater, dheightV );
-            erodeSecondPassKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, water, tmpWater, dheightV );
+            erodeFirstPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
+            erodeSecondPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
         }
     }
     else
