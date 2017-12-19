@@ -2,11 +2,29 @@
 #include <string>
 #include <fstream>
 #include <iostream>
-#include <chrono>
+//#include <chrono>
 
-#include <glm/glm.hpp>
-#include <Simplex.h>
+#include "noise.inl.cu"
 
+__global__
+void generateNoiseTextureKernel( float* heightmap, int size )
+{
+    int startx = threadIdx.x + blockIdx.x * blockDim.x;
+    int starty = threadIdx.y + blockIdx.y * blockDim.y;
+    int stridex = blockDim.x * gridDim.x;
+    int stridey = blockDim.y * gridDim.y;
+
+    for( int y = starty; y < size; y += stridey )
+    {
+        for( int x = startx; x < size; x += stridex )
+        {
+            float xpos = (float)x / size;
+            float ypos = (float)y / size;
+
+            heightmap[ x + y * size ] = Cuda::fbm( xpos, ypos, 8, 2.0f, 0.5f );
+        }
+    }
+}
 std::vector< float > generateNoiseTexture( int size )
 {
     std::vector< float > heightmap;
@@ -16,11 +34,20 @@ std::vector< float > generateNoiseTexture( int size )
     {
         for( int x = 0; x < size; x++ )
         {
-            glm::vec2 position( x, y );
-            position /= size;
+            float xpos = (float)x / size * 2.0f - 1.0f;
+            float ypos = (float)y / size * 2.0f - 1.0f;
 
-            float height = Simplex::fBm( position, 8, 2.0f, 0.5f );
-            heightmap.push_back( height );
+            float factor = 1.8f;
+            xpos *= factor;
+            ypos *= factor;
+
+            float height = fbm( xpos, ypos, 8, 2.0f, 0.5f );
+            float dist = sqrt( xpos * xpos + ypos * ypos );
+            float alpha = max( 1.0f - dist * dist, 0.0f );
+
+            //alpha = 1.0 - pow( abs( xpos * 4.0 ), 2.0f );
+            //alpha = max( alpha, 0.0f );
+            heightmap.push_back( 1.0f * ( height * 0.5 + 0.5 ) );
         }
     }
 
@@ -50,21 +77,21 @@ void erode( std::vector< float >& heightmap, int size, int iterations )
 
                 float m = heightmap[ index ];
                 float dtl = heightmap[ x - 1 + ( y + 1 ) * size ];
-                dtl = glm::max( m - dtl, 0.0f );
+                dtl = max( m - dtl, 0.0f );
                 float dt = heightmap[ x + ( y + 1 ) * size ];
-                dt = glm::max( m - dt, 0.0f );
+                dt = max( m - dt, 0.0f );
                 float dtr = heightmap[ x + 1 + ( y + 1 ) * size ];
-                dtr = glm::max( m - dtr, 0.0f );
+                dtr = max( m - dtr, 0.0f );
                 float dml = heightmap[ x - 1 + y * size ];
-                dml = glm::max( m - dml, 0.0f );
+                dml = max( m - dml, 0.0f );
                 float dmr = heightmap[ x + 1 + y * size ];
-                dmr = glm::max( m - dmr, 0.0f );
+                dmr = max( m - dmr, 0.0f );
                 float dbl = heightmap[ x - 1 + ( y - 1 ) * size ];
-                dbl = glm::max( m - dbl, 0.0f );
+                dbl = max( m - dbl, 0.0f );
                 float db = heightmap[ x + ( y - 1 ) * size ];
-                db = glm::max( m - db, 0.0f );
+                db = max( m - db, 0.0f );
                 float dbr = heightmap[ x + 1 + ( y - 1 ) * size ];
-                dbr = glm::max( m - dbr, 0.0f );
+                dbr = max( m - dbr, 0.0f );
 
                 float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
 
@@ -103,7 +130,7 @@ void erode( std::vector< float >& heightmap, int size, int iterations )
                 heightmap[ index ] += ( -( dheightV[ index ] - 0.005f / Scale ) * water[ index ] ) * Erosion + water[ index ] * Deposition;
 
                 if( oldHeight < heightmap[ index ] )
-                    water[ index ] = glm::max( water[index ] - ( heightmap[ index ] - oldHeight ) * 1000.0f, 0.0f );
+                    water[ index ] = max( water[index ] - ( heightmap[ index ] - oldHeight ) * 1000.0f, 0.0f );
             }
         }
     }
@@ -111,7 +138,7 @@ void erode( std::vector< float >& heightmap, int size, int iterations )
 
 void save( const std::string& fileName, int width, int height, const std::vector< float >& heightmap )
 {
-    std::ofstream file( fileName, std::ios::binary );
+    std::ofstream file( fileName.c_str(), std::ios::binary );
     if( file.fail() )
     {
         std::cout << "cannot save file " << fileName << std::endl;
@@ -125,15 +152,15 @@ void save( const std::string& fileName, int width, int height, const std::vector
 
 void cpuErosion( int size, int iterations )
 {
-    auto heightmap = generateNoiseTexture( size );
+    std::vector< float > heightmap = generateNoiseTexture( size );
 
-    auto start = std::chrono::high_resolution_clock::now();
+    //auto start = std::chrono::high_resolution_clock::now();
     erode( heightmap, size, iterations );
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast< std::chrono::milliseconds >( end - start ).count();
+    //auto end = std::chrono::high_resolution_clock::now();
+    //auto duration = std::chrono::duration_cast< std::chrono::milliseconds >( end - start ).count();
 
-    std::cout << "cpu erosion took " << duration << "ms" << std::endl;
+    //std::cout << "cpu erosion took " << duration << "ms" << std::endl;
 
     save( "noiseCPU.raw", size, size, heightmap );
 }
@@ -162,21 +189,21 @@ void erodeKernel( float* heightmap, int size, int iterations, float* water, floa
                 float m = heightmap[ index ];
 
                 float dtl = heightmap[ x - 1 + ( y + 1 ) * size ];
-                dtl = glm::max( m - dtl, 0.0f );
+                dtl = max( m - dtl, 0.0f );
                 float dt = heightmap[ x + ( y + 1 ) * size ];
-                dt = glm::max( m - dt, 0.0f );
+                dt = max( m - dt, 0.0f );
                 float dtr = heightmap[ x + 1 + ( y + 1 ) * size ];
-                dtr = glm::max( m - dtr, 0.0f );
+                dtr = max( m - dtr, 0.0f );
                 float dml = heightmap[ x - 1 + y * size ];
-                dml = glm::max( m - dml, 0.0f );
+                dml = max( m - dml, 0.0f );
                 float dmr = heightmap[ x + 1 + y * size ];
-                dmr = glm::max( m - dmr, 0.0f );
+                dmr = max( m - dmr, 0.0f );
                 float dbl = heightmap[ x - 1 + ( y - 1 ) * size ];
-                dbl = glm::max( m - dbl, 0.0f );
+                dbl = max( m - dbl, 0.0f );
                 float db = heightmap[ x + ( y - 1 ) * size ];
-                db = glm::max( m - db, 0.0f );
+                db = max( m - db, 0.0f );
                 float dbr = heightmap[ x + 1 + ( y - 1 ) * size ];
-                dbr = glm::max( m - dbr, 0.0f );
+                dbr = max( m - dbr, 0.0f );
 
                 float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
 
@@ -219,7 +246,7 @@ void erodeKernel( float* heightmap, int size, int iterations, float* water, floa
                 heightmap[ index ] += ( -( dheightV[ index ] - 0.005f / Scale ) * water[ index ] ) * Erosion + water[ index ] * Deposition;
 
                 if( oldHeight < heightmap[ index ] )
-                    water[ index ] = glm::max( water[index ] - ( heightmap[ index ] - oldHeight ) * 1000.0f, 0.0f );
+                    water[ index ] = max( water[index ] - ( heightmap[ index ] - oldHeight ) * 1000.0f, 0.0f );
             }
         }
 
@@ -416,12 +443,18 @@ void gpuErosion( int size, int iterations, bool multiPass )
     float* dheightV;
     cudaMallocManaged( &dheightV, bufferSize );
 
-    auto noise = generateNoiseTexture( size );
+    std::vector< float > noise = generateNoiseTexture( size );
 
     for( unsigned int i = 0; i < noise.size(); i++ )
         heightmap[ i ] = noise[ i ];
 
-    auto start = std::chrono::high_resolution_clock::now();
+    //auto start = std::chrono::high_resolution_clock::now();
+
+    cudaEvent_t begin, end;
+    cudaEventCreate( &begin );
+    cudaEventCreate( &end );
+
+    cudaEventRecord( begin );
 
     if( multiPass )
     {
@@ -440,12 +473,14 @@ void gpuErosion( int size, int iterations, bool multiPass )
         erodeKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, iterations, water, tmpWater, dheightV );
     }
 
-    cudaDeviceSynchronize();
+    cudaEventRecord( end );
+    cudaEventSynchronize( end );
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast< std::chrono::milliseconds >( end - start ).count();
+    float ms;
+    cudaEventElapsedTime( &ms, begin, end );
 
-    std::cout << "gpu erosion took " << duration << "ms" << std::endl;
+    std::cout << "gpu took " << ms << " ms" << std::endl;
+
     save( "noiseGPU.raw", size, size, std::vector< float >( heightmap, heightmap + size * size ) );
 
     cudaFree( heightmap );
@@ -454,11 +489,47 @@ void gpuErosion( int size, int iterations, bool multiPass )
     cudaFree( dheightV );
 }
 
+void testNoise( int size )
+{
+    /*clock_t start = clock();
+    std::vector< float > noise = generateNoiseTexture( size );
+    clock_t stop = clock();
+
+    std::cout << ( (double)( stop - start ) / CLOCKS_PER_SEC ) << std::endl;
+    return;*/
+
+    float* heightmap;
+    cudaMallocManaged( &heightmap, size * size * sizeof( float ) );
+
+    cudaEvent_t begin, end;
+    cudaEventCreate( &begin );
+    cudaEventCreate( &end );
+
+    cudaEventRecord( begin );
+    generateNoiseTextureKernel<<< 16, 1024 >>>( heightmap, size );
+
+    cudaEventRecord( end );
+    cudaEventSynchronize( end );
+
+    float ms;
+    cudaEventElapsedTime( &ms, begin, end );
+
+    std::cout << "gpu took " << ms << " ms" << std::endl;
+
+    cudaFree( heightmap );
+}
 int main()
 {
-    const int HeightmapSize = 2048;
-    const int Iterations = 300;
+    //const int HeightmapSize = 512;
+    //const int Iterations = 500;
     //cpuErosion( HeightmapSize, Iterations );
-    gpuErosion( HeightmapSize, Iterations, true );
+    //gpuErosion( HeightmapSize, Iterations, true );
+
+    int numBlocks, numThreads;
+    cudaOccupancyMaxPotentialBlockSize( &numBlocks, &numThreads, generateNoiseTextureKernel, 0, 0 );
+
+    std::cout << numBlocks << " " << numThreads << std::endl;
+
+    testNoise( 8192 * 2 );
     return 0;
 }
