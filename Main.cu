@@ -18,10 +18,18 @@ void generateNoiseTextureKernel( float* heightmap, int size )
     {
         for( int x = startx; x < size; x += stridex )
         {
-            float xpos = (float)x / size;
-            float ypos = (float)y / size;
+            float xpos = (float)x / size * 2.0f - 1.0f;
+            float ypos = (float)y / size * 2.0f - 1.0f;
 
-            heightmap[ x + y * size ] = Cuda::fbm( xpos, ypos, 8, 2.0f, 0.5f );
+            float factor = 1.8f;
+            xpos *= factor;
+            ypos *= factor;
+
+            float height = Cuda::fbm( xpos, ypos, 8, 2.0f, 0.5f );
+            float dist = sqrt( xpos * xpos + ypos * ypos );
+            float alpha = max( 1.0f - dist * dist, 0.0f );
+
+            heightmap[ x + y * size ] = 1.0f * height * 0.5 + 0.5;
         }
     }
 }
@@ -45,8 +53,6 @@ std::vector< float > generateNoiseTexture( int size )
             float dist = sqrt( xpos * xpos + ypos * ypos );
             float alpha = max( 1.0f - dist * dist, 0.0f );
 
-            //alpha = 1.0 - pow( abs( xpos * 4.0 ), 2.0f );
-            //alpha = max( alpha, 0.0f );
             heightmap.push_back( 1.0f * ( height * 0.5 + 0.5 ) );
         }
     }
@@ -134,35 +140,6 @@ void erode( std::vector< float >& heightmap, int size, int iterations )
             }
         }
     }
-}
-
-void save( const std::string& fileName, int width, int height, const std::vector< float >& heightmap )
-{
-    std::ofstream file( fileName.c_str(), std::ios::binary );
-    if( file.fail() )
-    {
-        std::cout << "cannot save file " << fileName << std::endl;
-        return;
-    }
-
-    file.write( reinterpret_cast< char* >( &width ), sizeof( int ) );
-    file.write( reinterpret_cast< char* >( &height ), sizeof( int ) );
-    file.write( reinterpret_cast< const char* >( &heightmap[ 0 ] ), heightmap.size() * sizeof( float ) );
-}
-
-void cpuErosion( int size, int iterations )
-{
-    std::vector< float > heightmap = generateNoiseTexture( size );
-
-    //auto start = std::chrono::high_resolution_clock::now();
-    erode( heightmap, size, iterations );
-
-    //auto end = std::chrono::high_resolution_clock::now();
-    //auto duration = std::chrono::duration_cast< std::chrono::milliseconds >( end - start ).count();
-
-    //std::cout << "cpu erosion took " << duration << "ms" << std::endl;
-
-    save( "noiseCPU.raw", size, size, heightmap );
 }
 
 __global__
@@ -427,79 +404,51 @@ void erodeSecondPassKernel( float* __restrict__ heightmap, int size, float* __re
     }
 }
 
-void gpuErosion( int size, int iterations, bool multiPass )
+void save( const std::string& fileName, int width, int height, const std::vector< float >& heightmap )
+{
+    std::ofstream file( fileName.c_str(), std::ios::binary );
+    if( file.fail() )
+    {
+        std::cout << "cannot save file " << fileName << std::endl;
+        return;
+    }
+
+    file.write( reinterpret_cast< char* >( &width ), sizeof( int ) );
+    file.write( reinterpret_cast< char* >( &height ), sizeof( int ) );
+    file.write( reinterpret_cast< const char* >( &heightmap[ 0 ] ), heightmap.size() * sizeof( float ) );
+}
+
+double elapsedTime( clock_t begin, clock_t end )
+{
+    return (double)( end - begin ) / CLOCKS_PER_SEC * 1000.0;
+}
+
+void cpuErosion( int size, int iterations, const std::string& fileName )
+{
+    clock_t begin = clock();
+    std::vector< float > heightmap = generateNoiseTexture( size );
+    clock_t end = clock();
+
+    std::cout << "Noise took " << elapsedTime( begin, end ) << " ms" << std::endl;
+
+    if( iterations > 0 )
+    {
+        begin = clock();
+        erode( heightmap, size, iterations );
+        end = clock();
+
+        std::cout << "Erosion took " << elapsedTime( begin, end ) << " ms" << std::endl;
+    }
+
+    save( fileName, size, size, heightmap );
+}
+
+void gpuErosion( int size, int iterations, const std::string& fileName, bool multiPass )
 {
     int bufferSize = sizeof( float ) * size * size;
 
     float* heightmap;
     cudaMallocManaged( &heightmap, bufferSize );
-
-    float* water;
-    cudaMallocManaged( &water, bufferSize );
-
-    float* tmpWater;
-    cudaMallocManaged( &tmpWater, bufferSize );
-
-    float* dheightV;
-    cudaMallocManaged( &dheightV, bufferSize );
-
-    std::vector< float > noise = generateNoiseTexture( size );
-
-    for( unsigned int i = 0; i < noise.size(); i++ )
-        heightmap[ i ] = noise[ i ];
-
-    //auto start = std::chrono::high_resolution_clock::now();
-
-    cudaEvent_t begin, end;
-    cudaEventCreate( &begin );
-    cudaEventCreate( &end );
-
-    cudaEventRecord( begin );
-
-    if( multiPass )
-    {
-        const int TileSize = 32;
-        dim3 numThreads( TileSize, TileSize );
-        dim3 numBlocks( size / TileSize, size / TileSize );
-
-        for( int i = 0; i < iterations; i++ )
-        {
-            erodeFirstPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
-            erodeSecondPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
-        }
-    }
-    else
-    {
-        erodeKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, iterations, water, tmpWater, dheightV );
-    }
-
-    cudaEventRecord( end );
-    cudaEventSynchronize( end );
-
-    float ms;
-    cudaEventElapsedTime( &ms, begin, end );
-
-    std::cout << "gpu took " << ms << " ms" << std::endl;
-
-    save( "noiseGPU.raw", size, size, std::vector< float >( heightmap, heightmap + size * size ) );
-
-    cudaFree( heightmap );
-    cudaFree( water );
-    cudaFree( tmpWater );
-    cudaFree( dheightV );
-}
-
-void testNoise( int size )
-{
-    /*clock_t start = clock();
-    std::vector< float > noise = generateNoiseTexture( size );
-    clock_t stop = clock();
-
-    std::cout << ( (double)( stop - start ) / CLOCKS_PER_SEC ) << std::endl;
-    return;*/
-
-    float* heightmap;
-    cudaMallocManaged( &heightmap, size * size * sizeof( float ) );
 
     cudaEvent_t begin, end;
     cudaEventCreate( &begin );
@@ -507,29 +456,83 @@ void testNoise( int size )
 
     cudaEventRecord( begin );
     generateNoiseTextureKernel<<< 16, 1024 >>>( heightmap, size );
-
     cudaEventRecord( end );
     cudaEventSynchronize( end );
 
     float ms;
     cudaEventElapsedTime( &ms, begin, end );
 
-    std::cout << "gpu took " << ms << " ms" << std::endl;
+    std::cout << "Noise took " << ms << " ms" << std::endl;
+
+    if( iterations > 0 )
+    {
+        float* water;
+        cudaMallocManaged( &water, bufferSize );
+
+        float* tmpWater;
+        cudaMallocManaged( &tmpWater, bufferSize );
+
+        float* dheightV;
+        cudaMallocManaged( &dheightV, bufferSize );
+
+        cudaEventRecord( begin );
+
+        if( multiPass )
+        {
+            const int TileSize = 32;
+            dim3 numThreads( TileSize, TileSize );
+            dim3 numBlocks( size / TileSize, size / TileSize );
+
+            for( int i = 0; i < iterations; i++ )
+            {
+                erodeFirstPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
+                erodeSecondPassKernel<<< numBlocks, numThreads >>>( heightmap, size, water, tmpWater, dheightV );
+            }
+        }
+        else
+        {
+            erodeKernel<<< 4, dim3( 32, 32 ) >>>( heightmap, size, iterations, water, tmpWater, dheightV );
+        }
+
+        cudaEventRecord( end );
+        cudaEventSynchronize( end );
+
+        cudaEventElapsedTime( &ms, begin, end );
+
+        std::cout << "Erosion took " << ms << " ms" << std::endl;
+
+        cudaFree( water );
+        cudaFree( tmpWater );
+        cudaFree( dheightV );
+    }
+
+    save( fileName, size, size, std::vector< float >( heightmap, heightmap + size * size ) );
 
     cudaFree( heightmap );
 }
-int main()
+
+int main( int argc, char* argv[] )
 {
-    //const int HeightmapSize = 512;
-    //const int Iterations = 500;
-    //cpuErosion( HeightmapSize, Iterations );
-    //gpuErosion( HeightmapSize, Iterations, true );
+    if( argc < 4 )
+    {
+        std::cout << "usage : erosion SIZE ITERATION FILE_NAME [RUN_ON_GPU]" << std::endl;
+        std::cout << "usage: SIZE: size of heightmap" << std::endl;
+        std::cout << "usage: ITERATION: > 0 for erosion, 0 for noise only" << std::endl;
+        std::cout << "usage: FILE_NAME: output file name" << std::endl;
+        std::cout << "usage: RUN_ON_GPU: 1 for GPU, 0 for CPU, default to 1" << std::endl;
 
-    int numBlocks, numThreads;
-    cudaOccupancyMaxPotentialBlockSize( &numBlocks, &numThreads, generateNoiseTextureKernel, 0, 0 );
+        return 0;
+    }
 
-    std::cout << numBlocks << " " << numThreads << std::endl;
+    int size = atoi( argv[ 1 ] );
+    int iterations = atoi( argv[ 2 ] );
+    std::string fileName = argv[ 3 ];
+    bool gpu = argc == 5 ? atoi( argv[ 4 ] ) : true;
 
-    testNoise( 8192 * 2 );
+    if( gpu )
+        gpuErosion( size, iterations, fileName, true );
+    else
+        cpuErosion( size, iterations, fileName );
+
     return 0;
 }
