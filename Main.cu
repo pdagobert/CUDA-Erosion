@@ -1,38 +1,13 @@
-#include <vector>
-#include <string>
 #include <fstream>
 #include <iostream>
-//#include <chrono>
+#include <string>
+#include <vector>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "external/stb_image_write.h"
 
 #include "noise.inl.cu"
 
-__global__
-void generateNoiseTextureKernel( float* heightmap, int size )
-{
-    int startx = threadIdx.x + blockIdx.x * blockDim.x;
-    int starty = threadIdx.y + blockIdx.y * blockDim.y;
-    int stridex = blockDim.x * gridDim.x;
-    int stridey = blockDim.y * gridDim.y;
-
-    for( int y = starty; y < size; y += stridey )
-    {
-        for( int x = startx; x < size; x += stridex )
-        {
-            float xpos = (float)x / size * 2.0f - 1.0f;
-            float ypos = (float)y / size * 2.0f - 1.0f;
-
-            float factor = 1.8f;
-            xpos *= factor;
-            ypos *= factor;
-
-            float height = Cuda::fbm( xpos, ypos, 8, 2.0f, 0.5f );
-            float dist = sqrt( xpos * xpos + ypos * ypos );
-            float alpha = max( 1.0f - dist * dist, 0.0f );
-
-            heightmap[ x + y * size ] = 1.0f * height * 0.5 + 0.5;
-        }
-    }
-}
 std::vector< float > generateNoiseTexture( int size )
 {
     std::vector< float > heightmap;
@@ -53,11 +28,39 @@ std::vector< float > generateNoiseTexture( int size )
             float dist = sqrt( xpos * xpos + ypos * ypos );
             float alpha = max( 1.0f - dist * dist, 0.0f );
 
-            heightmap.push_back( 1.0f * ( height * 0.5 + 0.5 ) );
+            heightmap.push_back( alpha * ( height * 0.5 + 0.5 ) );
         }
     }
 
     return heightmap;
+}
+
+__global__
+void generateNoiseTextureKernel( float* heightmap, int size )
+{
+    int startx = threadIdx.x + blockIdx.x * blockDim.x;
+    int starty = threadIdx.y + blockIdx.y * blockDim.y;
+    int stridex = blockDim.x * gridDim.x;
+    int stridey = blockDim.y * gridDim.y;
+
+    for( int y = starty; y < size; y += stridey )
+    {
+        for( int x = startx; x < size; x += stridex )
+        {
+            float xpos = (float)x / size * 2.0f - 1.0f;
+            float ypos = (float)y / size * 2.0f - 1.0f;
+
+            float factor = 1.3f;
+            xpos *= factor;
+            ypos *= factor;
+            float height = Cuda::fbmRidged( xpos + 455.0f, ypos + -591.0f, 8, 2.0f, 0.5f );
+            //float height = Cuda::fbmRidged( xpos + t, ypos + t, 2, 2.0f, 0.5f );
+            float dist = sqrt( xpos * xpos + ypos * ypos );
+            float alpha = max( 1.0f - dist * dist, 0.0f );
+
+            heightmap[ x + y * size ] = 1.0f * height;//( max( ( ( height * 0.5 + 0.5 ) - 0.2 ) * ( 1.0 / 0.8 ), 0.0f ) );
+        }
+    }
 }
 
 // https://github.com/RolandR/glterrain/blob/master/js/terrain.js
@@ -239,139 +242,128 @@ void erodeFirstPassKernel( float* __restrict__ heightmap, int size, float* __res
     const float Scale = 1.0f;
     const float Evaporation = 0.9f;
 
-    /*int startx = threadIdx.x + blockIdx.x * blockDim.x;
-    int starty = threadIdx.y + blockIdx.y * blockDim.y;
-    int stridex = blockDim.x * gridDim.x;
-    int stridey = blockDim.y * gridDim.y;
+    int x2 = threadIdx.x + blockIdx.x * blockDim.x;
+    int y2 = threadIdx.y + blockIdx.y * blockDim.y;
+    int indexGlobal = x2 + y2 * size;
 
-    for( int y = 1 + starty; y < size - 2; y += stridey )
+    int tileSize = 34;
+
+    int x = threadIdx.x + 1;
+    int y = threadIdx.y + 1;
+    int indexLocal = x + y * tileSize;
+
+    heightmapCache[ indexLocal ] = heightmap[ indexGlobal ];
+
+    int offset = 0;
+
+    if( threadIdx.x == 0 && x2 != 0 )
+        offset = -1;
+
+    if( threadIdx.x == 31 && x2 != size - 1 )
+        offset = 1;
+
+    if( offset != 0 )
     {
-        for( int x = 1 + startx; x < size - 2; x += stridex )
-        {*/
-            int x2 = threadIdx.x + blockIdx.x * blockDim.x;
-            int y2 = threadIdx.y + blockIdx.y * blockDim.y;
-            int indexGlobal = x2 + y2 * size;
+        int borderGlobal = x2 + offset + y2 * size;
+        int borderLocal = x + offset + y * tileSize;
+        heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+    }
 
-            int tileSize = 34;
+    offset = 0;
 
-            int x = threadIdx.x + 1;
-            int y = threadIdx.y + 1;
-            int indexLocal = x + y * tileSize;
+    if( threadIdx.y == 0 && y2 != 0 )
+        offset = -1;
 
-            heightmapCache[ indexLocal ] = heightmap[ indexGlobal ];
+    if( threadIdx.y == 31 && y2 != size - 1 )
+        offset = 1;
 
-            int offset = 0;
+    if( offset != 0 )
+    {
+        int borderGlobal = x2 + ( y2 + offset ) * size;
+        int borderLocal = x + ( y + offset ) * tileSize;
+        heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+    }
 
-            if( threadIdx.x == 0 && x2 != 0 )
-                offset = -1;
+    int xoffset = 0;
+    int yoffset = 0;
 
-            if( threadIdx.x == 31 && x2 != size - 1 )
-                offset = 1;
+    if( threadIdx.x == 0 && threadIdx.y == 0 && ( x2 != 0 && y2 != 0 ) )
+    {
+        xoffset = -1;
+        yoffset = -1;
+    }
 
-            if( offset != 0 )
-            {
-                int borderGlobal = x2 + offset + y2 * size;
-                int borderLocal = x + offset + y * tileSize;
-                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
-            }
+    if( threadIdx.x == 31 && threadIdx.y == 0 && ( x2 != size - 1 && y2 != 0 ) )
+    {
+        xoffset = 1;
+        yoffset = -1;
+    }
 
-            offset = 0;
+    if( threadIdx.x == 0 && threadIdx.y == 31 && ( x2 != 0 && y2 != size - 1 ) )
+    {
+        xoffset = -1;
+        yoffset = 1;
+    }
 
-            if( threadIdx.y == 0 && y2 != 0 )
-                offset = -1;
+    if( threadIdx.x == 31 && threadIdx.y == 31 && ( x2 != size - 1 && y2 != size - 1 ) )
+    {
+        xoffset = 1;
+        yoffset = 1;
+    }
 
-            if( threadIdx.y == 31 && y2 != size - 1 )
-                offset = 1;
+    if( xoffset != 0 )
+    {
+        int borderGlobal = x2 + xoffset + ( y2 + yoffset ) * size;
+        int borderLocal = x + xoffset + ( y + yoffset ) * tileSize;
+        heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
+    }
 
-            if( offset != 0 )
-            {
-                int borderGlobal = x2 + ( y2 + offset ) * size;
-                int borderLocal = x + ( y + offset ) * tileSize;
-                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
-            }
+    __syncthreads();
 
-            int xoffset = 0;
-            int yoffset = 0;
+    if( x2 == 0 || y2 == 0 || x2 == size - 1 || y2 == size - 1 )
+        return;
 
-            if( threadIdx.x == 0 && threadIdx.y == 0 && ( x2 != 0 && y2 != 0 ) )
-            {
-                xoffset = -1;
-                yoffset = -1;
-            }
+    float dtl = heightmapCache[ x - 1 + ( y + 1 ) * tileSize ];
+    float dt = heightmapCache[ x + ( y + 1 ) * tileSize ];
+    float dtr = heightmapCache[ x + 1 + ( y + 1 ) * tileSize ];
+    float dml = heightmapCache[ x - 1 + y * tileSize ];
+    float m = heightmapCache[ indexLocal ];
+    float dmr = heightmapCache[ x + 1 + y * tileSize ];
+    float dbl = heightmapCache[ x - 1 + ( y - 1 ) * tileSize ];
+    float db = heightmapCache[ x + ( y - 1 ) * tileSize ];
+    float dbr = heightmapCache[ x + 1 + ( y - 1 ) * tileSize ];
 
-            if( threadIdx.x == 31 && threadIdx.y == 0 && ( x2 != size - 1 && y2 != 0 ) )
-            {
-                xoffset = 1;
-                yoffset = -1;
-            }
+    dtl = max( m - dtl, 0.0f );
+    dt = max( m - dt, 0.0f );
+    dtr = max( m - dtr, 0.0f );
+    dml = max( m - dml, 0.0f );
+    dmr = max( m - dmr, 0.0f );
+    dbl = max( m - dbl, 0.0f );
+    db = max( m - db, 0.0f );
+    dbr = max( m - dbr, 0.0f );
 
-            if( threadIdx.x == 0 && threadIdx.y == 31 && ( x2 != 0 && y2 != size - 1 ) )
-            {
-                xoffset = -1;
-                yoffset = 1;
-            }
+    float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
 
-            if( threadIdx.x == 31 && threadIdx.y == 31 && ( x2 != size - 1 && y2 != size - 1 ) )
-            {
-                xoffset = 1;
-                yoffset = 1;
-            }
+    if( dheight != 0.0f )
+    {
+        float w = water[ indexGlobal ] * Evaporation;
+        float remainingWater = w * 0.0002 / ( dheight * Scale + 1.0f );
+        w -= remainingWater;
 
-            if( xoffset != 0 )
-            {
-                int borderGlobal = x2 + xoffset + ( y2 + yoffset ) * size;
-                int borderLocal = x + xoffset + ( y + yoffset ) * tileSize;
-                heightmapCache[ borderLocal ] = heightmap[ borderGlobal ];
-            }
+        // the only place where race condition can occur
+        atomicAdd( &tmpWater[ x2 - 1 + ( y2 + 1 ) * size ], dtl / dheight * w );
+        atomicAdd( &tmpWater[ x2 + ( y2 + 1 ) * size ], dt / dheight * w );
+        atomicAdd( &tmpWater[ x2 + 1 + ( y2 + 1 ) * size ], dtr / dheight * w );
+        atomicAdd( &tmpWater[ x2 - 1 + y2 * size ], dml / dheight * w );
+        atomicAdd( &tmpWater[ x2 + 1 + y2 * size ], dmr / dheight * w );
+        atomicAdd( &tmpWater[ x2 - 1 + ( y2 - 1 ) * size ], dbl / dheight * w );
+        atomicAdd( &tmpWater[ x2 + ( y2 - 1 ) * size ], db / dheight * w );
+        atomicAdd( &tmpWater[ x2 + 1 + ( y2 - 1 ) * size ], dbr / dheight * w );
 
-            __syncthreads();
+        water[ indexGlobal ] = 1.0f + remainingWater;
+    }
 
-            if( x2 == 0 || y2 == 0 || x2 == size - 1 || y2 == size - 1 )
-                return;
-
-            float dtl = heightmapCache[ x - 1 + ( y + 1 ) * tileSize ];
-            float dt = heightmapCache[ x + ( y + 1 ) * tileSize ];
-            float dtr = heightmapCache[ x + 1 + ( y + 1 ) * tileSize ];
-            float dml = heightmapCache[ x - 1 + y * tileSize ];
-            float m = heightmapCache[ indexLocal ];
-            float dmr = heightmapCache[ x + 1 + y * tileSize ];
-            float dbl = heightmapCache[ x - 1 + ( y - 1 ) * tileSize ];
-            float db = heightmapCache[ x + ( y - 1 ) * tileSize ];
-            float dbr = heightmapCache[ x + 1 + ( y - 1 ) * tileSize ];
-
-            dtl = max( m - dtl, 0.0f );
-            dt = max( m - dt, 0.0f );
-            dtr = max( m - dtr, 0.0f );
-            dml = max( m - dml, 0.0f );
-            dmr = max( m - dmr, 0.0f );
-            dbl = max( m - dbl, 0.0f );
-            db = max( m - db, 0.0f );
-            dbr = max( m - dbr, 0.0f );
-
-            float dheight = dtl + dt + dtr + dml + dmr + dbl + db + dbr;
-
-            if( dheight != 0.0f )
-            {
-                float w = water[ indexGlobal ] * Evaporation;
-                float remainingWater = w * 0.0002 / ( dheight * Scale + 1.0f );
-                w -= remainingWater;
-
-                // the only place where race condition can occur
-                atomicAdd( &tmpWater[ x2 - 1 + ( y2 + 1 ) * size ], dtl / dheight * w );
-                atomicAdd( &tmpWater[ x2 + ( y2 + 1 ) * size ], dt / dheight * w );
-                atomicAdd( &tmpWater[ x2 + 1 + ( y2 + 1 ) * size ], dtr / dheight * w );
-                atomicAdd( &tmpWater[ x2 - 1 + y2 * size ], dml / dheight * w );
-                atomicAdd( &tmpWater[ x2 + 1 + y2 * size ], dmr / dheight * w );
-                atomicAdd( &tmpWater[ x2 - 1 + ( y2 - 1 ) * size ], dbl / dheight * w );
-                atomicAdd( &tmpWater[ x2 + ( y2 - 1 ) * size ], db / dheight * w );
-                atomicAdd( &tmpWater[ x2 + 1 + ( y2 - 1 ) * size ], dbr / dheight * w );
-
-                water[ indexGlobal ] = 1.0f + remainingWater;
-            }
-
-            dheightV[ indexGlobal ] = dheight;
-    //    }
-    //}
+    dheightV[ indexGlobal ] = dheight;
 }
 
 __global__
@@ -406,7 +398,7 @@ void erodeSecondPassKernel( float* __restrict__ heightmap, int size, float* __re
 
 void save( const std::string& fileName, int width, int height, const std::vector< float >& heightmap )
 {
-    std::ofstream file( fileName.c_str(), std::ios::binary );
+    /*std::ofstream file( fileName.c_str(), std::ios::binary );
     if( file.fail() )
     {
         std::cout << "cannot save file " << fileName << std::endl;
@@ -415,7 +407,14 @@ void save( const std::string& fileName, int width, int height, const std::vector
 
     file.write( reinterpret_cast< char* >( &width ), sizeof( int ) );
     file.write( reinterpret_cast< char* >( &height ), sizeof( int ) );
-    file.write( reinterpret_cast< const char* >( &heightmap[ 0 ] ), heightmap.size() * sizeof( float ) );
+    file.write( reinterpret_cast< const char* >( &heightmap[ 0 ] ), heightmap.size() * sizeof( float ) );*/
+
+    std::vector< unsigned char > pixels( width * height );
+
+    for( int i = 0; i < width * height; i++ )
+        pixels[ i ] = min( max( heightmap[ i ] * 255.0f, 0.0f ), 255.0f );
+
+    stbi_write_png( ( fileName + ".png" ).c_str(), width, height, 1, &pixels[ 0 ], 0 );
 }
 
 double elapsedTime( clock_t begin, clock_t end )
